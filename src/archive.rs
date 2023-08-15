@@ -40,6 +40,12 @@ pub struct Header {
 }
 
 impl Header {
+    pub fn insert(&mut self, key: &str, entry: EntryMetadata) -> Result<()> {
+        ensure!(!self.entries.contains_key(key), "Key already exists");
+        self.entries.insert(key.to_string(), entry);
+        Ok(())
+    }
+
     pub fn read(path: &str) -> Result<Self> {
         let path = Path::new(path);
         ensure!(path.exists(), "File does not exist");
@@ -135,7 +141,7 @@ impl ArchiveWriter {
             self.data.len(),
         ).unwrap();
         self.len += entry.size();
-        self.header.entries.insert(key.to_string(), entry);
+        self.header.insert(key, entry).unwrap();
     }
 
     fn flush(&mut self) -> Result<()> {
