@@ -11,6 +11,6 @@ classifiers = [
     "Programming Language :: Python :: Implementation :: PyPy",
 ]
 
-
 [tool.maturin]
+strip = true
 features = ["pyo3/extension-module"]

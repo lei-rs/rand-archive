@@ -1,5 +1,4 @@
-use std::fs;
-use std::fs::{File, Metadata, OpenOptions};
+use std::fs::{File, metadata, OpenOptions};
 use std::io::{Read, Write};
 use std::path::Path;
 
@@ -129,7 +128,7 @@ impl ArchiveWriter {
 
     pub fn read(path: &str, cache_size: usize) -> Result<Self> {
         let header = Header::read(path)?;
-        let len = fs::metadata(path)?.len() as usize - HEADER_SIZE - 8;
+        let len = metadata(path)?.len() as usize - HEADER_SIZE - 8;
         ensure!(len > HEADER_SIZE, "Archive is empty");
         let path = path.to_string();
         Ok(Self {
