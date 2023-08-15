@@ -1,5 +1,5 @@
 use pyo3::{IntoPy, pyclass, PyObject, Python};
-use crate::archive::EntryMetadata;
+use crate::archive::{EntryMetadata, Header, ArchiveWriter};
 
 
 #[pyclass(name = "EntryMetadata")]

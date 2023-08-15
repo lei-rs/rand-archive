@@ -3,14 +3,16 @@ use std::io::{Read, Write};
 use std::os::unix::fs::FileExt;
 use std::path::Path;
 
-use color_eyre::eyre::{ensure, Result, WrapErr};
+use color_eyre::eyre::{ensure, eyre, Result, WrapErr};
 use indexmap::IndexMap;
 use rand::SeedableRng;
 use rand::seq::SliceRandom;
 use rand_chacha::ChaCha8Rng;
 use serde::{Deserialize, Serialize};
 
-const HEADER_SIZE: usize = 1048576 - 1;
+
+const HEADER_SIZE: usize = 1048576 - 8;
+
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct EntryMetadata {
@@ -38,7 +40,7 @@ pub struct Header {
 }
 
 impl Header {
-    fn read(path: &str) -> Result<Self> {
+    pub fn read(path: &str) -> Result<Self> {
         let path = Path::new(path);
         ensure!(path.exists(), "File does not exist");
         let mut file = File::open(path)
@@ -47,10 +49,25 @@ impl Header {
         file.read_exact(&mut buffer)
             .wrap_err(format!("Failed to read header: {}", path.display()))?;
         let header_len = u64::from_be_bytes(buffer[..8].try_into()
-            .wrap_err(format!("Failed to read header length: {}", path.display()))?);
+            .wrap_err(format!("Failed to read header: {}", path.display()))?);
         let header: Header = serde_json::from_slice(&buffer[8..(8 + header_len as usize)])
             .wrap_err(format!("Failed to parse header: {}", path.display()))?;
         Ok(header)
+    }
+
+    fn write(&self, path: &str) -> Result<()> {
+        let path = Path::new(path);
+        let mut file = match path.exists() {
+            true => OpenOptions::new().write(true).open(path)?,
+            false => OpenOptions::new().write(true).create(true).open(path)?,
+        };
+        let header = serde_json::to_string(&self)?;
+        let header_bytes = header.as_bytes();
+        let header_len = header_bytes.len() as u64;
+        ensure!(header_len < HEADER_SIZE as u64, "Too many entries");
+        file.write_all(&header_len.to_be_bytes())?;
+        file.write_at(header_bytes, 8)?;
+        Ok(())
     }
 
     fn collect_block(&self, block_size: usize, first_idx: usize) -> Result<Vec<EntryMetadata>> {
@@ -72,7 +89,7 @@ impl Header {
         Ok(entries)
     }
 
-    fn block_shuffle(&self, block_size: usize, seed: u64) -> Result<Vec<Vec<EntryMetadata>>> {
+    pub fn block_shuffle(&self, block_size: usize, seed: u64) -> Result<Vec<Vec<EntryMetadata>>> {
         ensure!(!self.entries.is_empty(), "No entries to shuffle");
 
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
@@ -121,45 +138,29 @@ impl ArchiveWriter {
         self.header.entries.insert(key.to_string(), entry);
     }
 
-    fn write_header(&self) -> Result<()> {
+    fn flush(&mut self) -> Result<()> {
         let path = Path::new(&self.path);
         let mut file = match path.exists() {
-            true => OpenOptions::new().write(true).open(&self.path)
-                .wrap_err(format!("Failed to open header: {}", path.display()))?,
-            false => OpenOptions::new().write(true).create(true).open(&self.path)
-                .wrap_err(format!("Failed to create header: {}", path.display()))?,
+            true => OpenOptions::new().write(true).append(true).open(&self.path)?,
+            false => OpenOptions::new().write(true).append(true).create(true).open(&self.path)?,
         };
-        let header = serde_json::to_string(&self.header)
-            .wrap_err(format!("Failed to serialize header: {}", path.display()))?;
-        let header_bytes = header.as_bytes();
-        let header_len = header_bytes.len() as u64;
-        ensure!(header_len < HEADER_SIZE as u64, "Too many entries");
-        file.write_all(&header_len.to_be_bytes())
-            .wrap_err(format!("Failed to write header length: {}", path.display()))?;
-        file.write_at(header_bytes, 8)
-            .wrap_err(format!("Failed to write to header: {}", path.display()))?;
-        Ok(())
-    }
-
-    pub fn flush(&mut self) -> Result<()> {
-        let path = Path::new(&self.path);
-        let mut file = match path.exists() {
-            true => OpenOptions::new().write(true).append(true).open(&self.path)
-                .wrap_err(format!("Failed to open data: {}", path.display()))?,
-            false => OpenOptions::new().write(true).append(true).create(true).open(&self.path)
-                .wrap_err(format!("Failed to create data: {}", path.display()))?,
-        };
-        file.write_all(&self.data)
-            .wrap_err(format!("Failed to write to data: {}", path.display()))?;
+        file.write_all(&self.data)?;
         self.data.clear();
-        self.write_header()
+        self.header.write(&self.path).map_err(|e| eyre!(e))
+            .wrap_err(format!("Failed to write header: {}", path.display()))
     }
 
     pub fn write(&mut self, key: &str, value: &[u8]) -> Result<()> {
         self.append(key, value);
         if self.data.len() > self.in_mem_size {
-            self.flush()?;
+            self.flush().map_err(|e| eyre!(e))
+                .wrap_err(format!("Failed to flush archive: {}", self.path))?;
         }
         Ok(())
+    }
+
+    pub fn finish(&mut self) -> Result<()> {
+        self.flush().map_err(|e| eyre!(e))
+            .wrap_err(format!("Failed to flush archive: {}", self.path))
     }
 }
