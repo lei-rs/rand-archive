@@ -1,2 +1,2 @@
-mod pyo3;
-mod archive;
+pub mod archive;
+pub mod pyo3;

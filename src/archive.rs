@@ -1,6 +1,6 @@
-use std::fs::{File, OpenOptions};
+use std::fs;
+use std::fs::{File, Metadata, OpenOptions};
 use std::io::{Read, Write};
-use std::os::unix::fs::FileExt;
 use std::path::Path;
 
 use color_eyre::eyre::{ensure, eyre, Result, WrapErr};
@@ -14,14 +14,14 @@ use serde::{Deserialize, Serialize};
 const HEADER_SIZE: usize = 1048576 - 8;
 
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EntryMetadata {
     pub start: usize,
     pub end: usize,
 }
 
 impl EntryMetadata {
-    fn try_new(start: usize, end: usize) -> Result<Self> {
+    pub fn try_new(start: usize, end: usize) -> Result<Self> {
         ensure!(start < end, "Start must be less than end");
         Ok(Self {
             start,
@@ -29,18 +29,19 @@ impl EntryMetadata {
         })
     }
 
-    fn size(&self) -> usize {
+    pub fn size(&self) -> usize {
         self.end - self.start
     }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Header {
-    entries: IndexMap<String, EntryMetadata>,
+    pub entries: IndexMap<String, EntryMetadata>,
+    pub header_size: usize,
 }
 
 impl Header {
-    pub fn insert(&mut self, key: &str, entry: EntryMetadata) -> Result<()> {
+    fn insert(&mut self, key: &str, entry: EntryMetadata) -> Result<()> {
         ensure!(!self.entries.contains_key(key), "Key already exists");
         self.entries.insert(key.to_string(), entry);
         Ok(())
@@ -49,15 +50,11 @@ impl Header {
     pub fn read(path: &str) -> Result<Self> {
         let path = Path::new(path);
         ensure!(path.exists(), "File does not exist");
-        let mut file = File::open(path)
-            .wrap_err(format!("Failed to open file: {}", path.display()))?;
-        let mut buffer = [0u8; HEADER_SIZE];
-        file.read_exact(&mut buffer)
-            .wrap_err(format!("Failed to read header: {}", path.display()))?;
-        let header_len = u64::from_be_bytes(buffer[..8].try_into()
-            .wrap_err(format!("Failed to read header: {}", path.display()))?);
-        let header: Header = serde_json::from_slice(&buffer[8..(8 + header_len as usize)])
-            .wrap_err(format!("Failed to parse header: {}", path.display()))?;
+        let file = File::open(path)?;
+        let mut buffer = Vec::with_capacity(HEADER_SIZE);
+        file.take(HEADER_SIZE as u64).read_to_end(&mut buffer)?;
+        let header_len = u64::from_be_bytes(buffer[0..8].try_into()?);
+        let header: Header = serde_json::from_slice(&buffer[8..(8 + header_len as usize)])?;
         Ok(header)
     }
 
@@ -67,25 +64,22 @@ impl Header {
             true => OpenOptions::new().write(true).open(path)?,
             false => OpenOptions::new().write(true).create(true).open(path)?,
         };
-        let header = serde_json::to_string(&self)?;
-        let header_bytes = header.as_bytes();
-        let header_len = header_bytes.len() as u64;
+        let header_str = serde_json::to_string(&self)?;
+        let mut header_bytes = [0u8; HEADER_SIZE + 8];
+        let header_len = header_str.chars().count() as u64;
         ensure!(header_len < HEADER_SIZE as u64, "Too many entries");
-        file.write_all(&header_len.to_be_bytes())?;
-        file.write_at(header_bytes, 8)?;
+        header_bytes[0..8].copy_from_slice(&header_len.to_be_bytes());
+        header_bytes[8..(8 + header_len as usize)].copy_from_slice(header_str.as_bytes());
+        file.write_all(&header_bytes)?;
         Ok(())
     }
 
     fn collect_block(&self, block_size: usize, first_idx: usize) -> Result<Vec<EntryMetadata>> {
         let mut entries = Vec::new();
-        let (_, first_entry) = self.entries.get_index(first_idx).unwrap();
-        let start = first_entry.start;
-        let mut end = start;
         let mut size = 0;
 
         for (_, entry) in self.entries.iter().skip(first_idx) {
             size += entry.size();
-            end = entry.end;
             entries.push(entry.clone());
             if size + entry.size() > block_size {
                 break;
@@ -115,57 +109,66 @@ impl Header {
 
 #[derive(Clone, Debug)]
 pub struct ArchiveWriter {
-    path: String,
-    data: Vec<u8>,
+    pub path: String,
+    cache: Vec<u8>,
     header: Header,
-    len: usize,
-    in_mem_size: usize,
+    data_size: usize,
+    cache_size: usize,
 }
 
 impl ArchiveWriter {
-    pub fn new(path: String, in_mem_size: Option<usize>) -> Self {
-        let in_mem_size = in_mem_size.unwrap_or(524288000);
+    pub fn new(path: String, cache_size: usize) -> Self {
         Self {
             path,
-            data: Vec::new(),
+            cache: Vec::new(),
             header: Header::default(),
-            len: 0,
-            in_mem_size,
+            data_size: 0,
+            cache_size,
         }
     }
 
+    pub fn read(path: &str, cache_size: usize) -> Result<Self> {
+        let header = Header::read(path)?;
+        let len = fs::metadata(path)?.len() as usize - HEADER_SIZE - 8;
+        ensure!(len > HEADER_SIZE, "Archive is empty");
+        let path = path.to_string();
+        Ok(Self {
+            path,
+            cache: Vec::new(),
+            header,
+            data_size: len,
+            cache_size,
+        })
+    }
+
     fn append(&mut self, key: &str, value: &[u8]) {
-        self.data.extend_from_slice(value);
+        self.cache.extend_from_slice(value);
         let entry = EntryMetadata::try_new(
-            self.len,
-            self.data.len(),
+            self.data_size,
+            self.cache.len(),
         ).unwrap();
-        self.len += entry.size();
+        self.data_size += entry.size();
         self.header.insert(key, entry).unwrap();
     }
 
     fn flush(&mut self) -> Result<()> {
-        let path = Path::new(&self.path);
-        let mut file = match path.exists() {
-            true => OpenOptions::new().write(true).append(true).open(&self.path)?,
-            false => OpenOptions::new().write(true).append(true).create(true).open(&self.path)?,
-        };
-        file.write_all(&self.data)?;
-        self.data.clear();
-        self.header.write(&self.path).map_err(|e| eyre!(e))
-            .wrap_err(format!("Failed to write header: {}", path.display()))
+        self.header.write(&self.path)?;
+        let mut file = OpenOptions::new().write(true).append(true).open(&self.path)?;
+        file.write_all(&self.cache)?;
+        self.cache.clear();
+        Ok(())
     }
 
     pub fn write(&mut self, key: &str, value: &[u8]) -> Result<()> {
         self.append(key, value);
-        if self.data.len() > self.in_mem_size {
+        if self.cache.len() > self.cache_size {
             self.flush().map_err(|e| eyre!(e))
                 .wrap_err(format!("Failed to flush archive: {}", self.path))?;
         }
         Ok(())
     }
 
-    pub fn finish(&mut self) -> Result<()> {
+    pub fn close(&mut self) -> Result<()> {
         self.flush().map_err(|e| eyre!(e))
             .wrap_err(format!("Failed to flush archive: {}", self.path))
     }
