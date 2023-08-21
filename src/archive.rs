@@ -1,11 +1,11 @@
-use std::fs::{File, metadata, OpenOptions};
+use std::fs::{metadata, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::Path;
 
 use color_eyre::eyre::{ensure, eyre, Result, WrapErr};
 use indexmap::IndexMap;
-use rand::SeedableRng;
 use rand::seq::SliceRandom;
+use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use serde::{Deserialize, Serialize};
 
@@ -22,10 +22,7 @@ pub struct EntryMetadata {
 impl EntryMetadata {
     pub fn try_new(start: usize, end: usize) -> Result<Self> {
         ensure!(start < end, "Start must be less than end");
-        Ok(Self {
-            start,
-            end,
-        })
+        Ok(Self { start, end })
     }
 
     pub fn size(&self) -> usize {
@@ -129,7 +126,7 @@ impl ArchiveWriter {
     pub fn read(path: &str, cache_size: usize) -> Result<Self> {
         let header = Header::read(path)?;
         let len = metadata(path)?.len() as usize - HEADER_SIZE - 8;
-        ensure!(len > HEADER_SIZE, "Archive is empty");
+        ensure!(len > 0, "Archive is empty");
         let path = path.to_string();
         Ok(Self {
             path,
@@ -140,35 +137,79 @@ impl ArchiveWriter {
         })
     }
 
-    fn append(&mut self, key: &str, value: &[u8]) {
+    fn append(&mut self, key: &str, value: &[u8]) -> Result<()> {
+        ensure!(!value.is_empty(), "Value is empty");
+
         self.cache.extend_from_slice(value);
-        let entry = EntryMetadata::try_new(
-            self.data_size,
-            self.cache.len(),
-        ).unwrap();
-        self.data_size += entry.size();
+        let entry = EntryMetadata::try_new(self.data_size, self.data_size + value.len()).unwrap();
+        self.data_size = entry.end;
         self.header.insert(key, entry).unwrap();
+        Ok(())
     }
 
     fn flush(&mut self) -> Result<()> {
         self.header.write(&self.path)?;
-        let mut file = OpenOptions::new().write(true).append(true).open(&self.path)?;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .append(true)
+            .open(&self.path)?;
         file.write_all(&self.cache)?;
         self.cache.clear();
         Ok(())
     }
 
     pub fn write(&mut self, key: &str, value: &[u8]) -> Result<()> {
-        self.append(key, value);
-        if self.cache.len() > self.cache_size {
-            self.flush().map_err(|e| eyre!(e))
+        self.append(key, value)?;
+        if self.cache.len() >= self.cache_size {
+            self.flush()
+                .map_err(|e| eyre!(e))
                 .wrap_err(format!("Failed to flush archive: {}", self.path))?;
         }
         Ok(())
     }
 
     pub fn close(&mut self) -> Result<()> {
-        self.flush().map_err(|e| eyre!(e))
+        self.flush()
+            .map_err(|e| eyre!(e))
             .wrap_err(format!("Failed to flush archive: {}", self.path))
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{assert_eq, fs};
+
+    #[test]
+    fn header_read_write() {
+        color_eyre::install().unwrap();
+        let path = "tests/cache/header_read_write.raa";
+        let mut header = Header::default();
+        let entry = EntryMetadata::try_new(0, 100).unwrap();
+        header.insert("dummy", entry).unwrap();
+        header.write(path).unwrap();
+        let header_back = Header::read(path).unwrap();
+        assert_eq!(
+            header.entries.get("dummy").unwrap(),
+            header_back.entries.get("dummy").unwrap()
+        );
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn archive_flush() {
+        color_eyre::install().unwrap();
+        let path = "tests/cache/archive_flush.raa";
+        let mut archive = ArchiveWriter::new(path.to_string(), 100);
+        let entry = EntryMetadata::try_new(0, 100).unwrap();
+        archive.append("dummy", &[0u8; 100]).unwrap();
+        archive.flush().unwrap();
+        let header = Header::read(path).unwrap();
+        assert_eq!(
+            header.entries.get("dummy").unwrap(),
+            &entry
+        );
+        fs::remove_file(path).unwrap();
     }
 }
