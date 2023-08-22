@@ -4,11 +4,14 @@ use indexmap::IndexMap;
 use pyo3::prelude::*;
 use pyo3::types::{IntoPyDict, PyDict, PyType};
 
+const DEF_CACHE_SIZE: usize = 100 * 1024 * 1024;
+const DEF_HEADER_SIZE: usize = 1024 * 1024;
+
 impl IntoPyDict for EntryMetadata {
     fn into_py_dict(self, py: Python<'_>) -> &PyDict {
         let dict = PyDict::new(py);
         dict.set_item("start", self.start).unwrap();
-        dict.set_item("end", self.end).unwrap();
+        dict.set_item("end", self.end()).unwrap();
         dict
     }
 }
@@ -21,6 +24,11 @@ pub struct PyHeader {
 
 #[pymethods]
 impl PyHeader {
+    #[classmethod]
+    pub fn calc_header_size(cls: &PyType, key_size: usize, n_entries: usize) -> usize {
+        n_entries * (key_size + 16)
+    }
+
     #[classmethod]
     pub fn read(cls: &PyType, path: &str) -> Result<Self> {
         let inner = Header::read(path)?;
@@ -45,15 +53,15 @@ pub struct PyArchiveWriter {
 #[pymethods]
 impl PyArchiveWriter {
     #[new]
-    #[pyo3(signature = (path, cache_size=524288000))]
-    pub fn new(path: String, cache_size: usize) -> Self {
+    #[pyo3(signature = (path, cache_size=DEF_CACHE_SIZE, max_header_size=DEF_HEADER_SIZE))]
+    pub fn new(path: String, cache_size: usize, max_header_size: usize) -> Self {
         Self {
-            inner: ArchiveWriter::new(path, cache_size),
+            inner: ArchiveWriter::new(path, cache_size, max_header_size),
         }
     }
 
     #[classmethod]
-    #[pyo3(signature = (path, cache_size=524288000))]
+    #[pyo3(signature = (path, cache_size=DEF_CACHE_SIZE))]
     pub fn read(cls: &PyType, path: &str, cache_size: usize) -> Result<Self> {
         let inner = ArchiveWriter::read(path, cache_size)?;
         Ok(PyArchiveWriter { inner })

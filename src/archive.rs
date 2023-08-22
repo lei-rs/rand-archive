@@ -9,31 +9,37 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use serde::{Deserialize, Serialize};
 
-const HEADER_SIZE: usize = 1048576 - 8;
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EntryMetadata {
     pub start: usize,
-    pub end: usize,
+    pub offset: usize,
 }
 
 impl EntryMetadata {
-    pub fn try_new(start: usize, end: usize) -> Result<Self> {
-        ensure!(start < end, "Start must be less than end");
-        Ok(Self { start, end })
+    pub fn try_new(start: usize, offset: usize) -> Result<Self> {
+        ensure!(offset > 0, "Size must be greater than 0");
+        Ok(Self { start, offset })
     }
 
-    pub fn size(&self) -> usize {
-        self.end - self.start
+    pub fn end(&self) -> usize {
+        self.start + self.offset
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Header {
+    pub max_size: usize,
     pub entries: IndexMap<String, EntryMetadata>,
 }
 
 impl Header {
+    fn new(max_size: usize) -> Self {
+        Self {
+            max_size,
+            entries: IndexMap::new(),
+        }
+    }
+
     fn insert(&mut self, key: &str, entry: EntryMetadata) -> Result<()> {
         ensure!(!self.entries.contains_key(key), "Key already exists");
         self.entries.insert(key.to_string(), entry);
@@ -43,15 +49,18 @@ impl Header {
     pub fn read(path: &str) -> Result<Self> {
         let path = Path::new(path);
         ensure!(path.exists(), "File does not exist");
-        let file = File::open(path)?;
+        let mut file = File::open(path)?;
 
-        let mut buffer = Vec::with_capacity(HEADER_SIZE);
-        file.take(HEADER_SIZE as u64).read_to_end(&mut buffer)?;
-        let header_len = u64::from_be_bytes(buffer[0..8].try_into()?);
-        let header: IndexMap<String, EntryMetadata> =
-            bitcode::deserialize(&buffer[8..(8 + header_len as usize)])?;
+        let mut header_len = [0u8; 8];
+        file.read_exact(&mut header_len)?;
+        let header_len = u64::from_be_bytes(header_len);
 
-        Ok(Self { entries: header })
+        let mut buffer = Vec::with_capacity(header_len as usize);
+        file.seek(SeekFrom::Start(8))?;
+        file.take(header_len).read_to_end(&mut buffer)?;
+        bincode::deserialize(&buffer)
+            .map_err(|e| eyre!(e))
+            .wrap_err("Failed to deserialize header")
     }
 
     fn write(&self, path: &str) -> Result<()> {
@@ -61,10 +70,10 @@ impl Header {
             false => OpenOptions::new().write(true).create(true).open(path)?,
         };
 
-        let header = bitcode::serialize(&self.entries)?;
+        let header = bincode::serialize(&self)?;
         let header_len = header.len() as u64;
-        ensure!(header_len < HEADER_SIZE as u64, "Too many entries");
-        let padding = vec![0u8; HEADER_SIZE - header_len as usize];
+        ensure!(header_len <= self.max_size as u64, "Too many entries");
+        let padding = vec![0u8; self.max_size - header_len as usize];
 
         file.write_all(&header_len.to_be_bytes())?;
         file.seek(SeekFrom::Start(8))?;
@@ -80,9 +89,9 @@ impl Header {
         let mut size = 0;
 
         for (_, entry) in self.entries.iter().skip(first_idx) {
-            size += entry.size();
+            size += entry.offset;
             entries.push(entry.clone());
-            if size + entry.size() > block_size {
+            if size + entry.offset > block_size {
                 break;
             }
         }
@@ -118,11 +127,11 @@ pub struct ArchiveWriter {
 }
 
 impl ArchiveWriter {
-    pub fn new(path: String, cache_size: usize) -> Self {
+    pub fn new(path: String, cache_size: usize, header_max_size: usize) -> Self {
         Self {
             path,
             cache: Vec::new(),
-            header: Header::default(),
+            header: Header::new(header_max_size),
             data_size: 0,
             cache_size,
         }
@@ -130,9 +139,10 @@ impl ArchiveWriter {
 
     pub fn read(path: &str, cache_size: usize) -> Result<Self> {
         let header = Header::read(path)?;
-        let len = metadata(path)?.len() as usize - HEADER_SIZE - 8;
-        ensure!(len > 0, "Archive is empty");
+        let len = metadata(path)?.len() as usize;
+        ensure!(len > header.max_size, "Archive has no entries");
         let path = path.to_string();
+
         Ok(Self {
             path,
             cache: Vec::new(),
@@ -146,8 +156,8 @@ impl ArchiveWriter {
         ensure!(!value.is_empty(), "Value is empty");
 
         self.cache.extend_from_slice(value);
-        let entry = EntryMetadata::try_new(self.data_size, self.data_size + value.len())?;
-        self.data_size = entry.end;
+        let entry = EntryMetadata::try_new(self.data_size, value.len())?;
+        self.data_size = entry.end();
         self.header.insert(key, entry).unwrap();
         Ok(())
     }
@@ -198,15 +208,18 @@ mod tests {
     fn header_read_write() {
         setup();
         let path = "tests/cache/header_read_write.raa";
-        let mut header = Header::default();
+        let mut header = Header::new(1000);
+
         let entry = EntryMetadata::try_new(0, 100).unwrap();
         header.insert("dummy", entry).unwrap();
         header.write(path).unwrap();
+
         let header_back = Header::read(path).unwrap();
         assert_eq!(
             header.entries.get("dummy").unwrap(),
             header_back.entries.get("dummy").unwrap()
         );
+
         fs::remove_file(path).unwrap();
     }
 
@@ -214,12 +227,15 @@ mod tests {
     fn archive_flush() {
         setup();
         let path = "tests/cache/archive_flush.raa";
-        let mut archive = ArchiveWriter::new(path.to_string(), 100);
+        let mut archive = ArchiveWriter::new(path.to_string(), 100, 1000);
         let entry = EntryMetadata::try_new(0, 100).unwrap();
+
         archive.append("dummy", &[0u8; 100]).unwrap();
         archive.flush().unwrap();
+
         let header = Header::read(path).unwrap();
         assert_eq!(header.entries.get("dummy").unwrap(), &entry);
+
         fs::remove_file(path).unwrap();
     }
 }
