@@ -49,7 +49,7 @@ impl Header {
         file.take(HEADER_SIZE as u64).read_to_end(&mut buffer)?;
         let header_len = u64::from_be_bytes(buffer[0..8].try_into()?);
         let header: IndexMap<String, EntryMetadata> =
-            bincode::deserialize(&buffer[8..(8 + header_len as usize)])?;
+            bitcode::deserialize(&buffer[8..(8 + header_len as usize)])?;
 
         Ok(Self { entries: header })
     }
@@ -61,7 +61,7 @@ impl Header {
             false => OpenOptions::new().write(true).create(true).open(path)?,
         };
 
-        let header = bincode::serialize(&self.entries)?;
+        let header = bitcode::serialize(&self.entries)?;
         let header_len = header.len() as u64;
         ensure!(header_len < HEADER_SIZE as u64, "Too many entries");
         let padding = vec![0u8; HEADER_SIZE - header_len as usize];
