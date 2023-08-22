@@ -1,7 +1,7 @@
 mod tests {
-    use rand_archive::archive::{EntryMetadata, Header, ArchiveWriter};
-    use std::{assert_eq, fs};
+    use rand_archive::archive::{ArchiveWriter, EntryMetadata, Header};
     use std::sync::Once;
+    use std::{assert_eq, fs};
 
     static INIT: Once = Once::new();
 

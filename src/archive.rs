@@ -1,5 +1,5 @@
 use std::fs::{metadata, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use color_eyre::eyre::{ensure, eyre, Result, WrapErr};
@@ -9,9 +9,7 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use serde::{Deserialize, Serialize};
 
-
 const HEADER_SIZE: usize = 1048576 - 8;
-
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EntryMetadata {
@@ -30,10 +28,9 @@ impl EntryMetadata {
     }
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default)]
 pub struct Header {
     pub entries: IndexMap<String, EntryMetadata>,
-    pub header_size: usize,
 }
 
 impl Header {
@@ -47,11 +44,14 @@ impl Header {
         let path = Path::new(path);
         ensure!(path.exists(), "File does not exist");
         let file = File::open(path)?;
+
         let mut buffer = Vec::with_capacity(HEADER_SIZE);
         file.take(HEADER_SIZE as u64).read_to_end(&mut buffer)?;
         let header_len = u64::from_be_bytes(buffer[0..8].try_into()?);
-        let header: Header = serde_json::from_slice(&buffer[8..(8 + header_len as usize)])?;
-        Ok(header)
+        let header: IndexMap<String, EntryMetadata> =
+            bincode::deserialize(&buffer[8..(8 + header_len as usize)])?;
+
+        Ok(Self { entries: header })
     }
 
     fn write(&self, path: &str) -> Result<()> {
@@ -60,13 +60,18 @@ impl Header {
             true => OpenOptions::new().write(true).open(path)?,
             false => OpenOptions::new().write(true).create(true).open(path)?,
         };
-        let header_str = serde_json::to_string(&self)?;
-        let mut header_bytes = [0u8; HEADER_SIZE + 8];
-        let header_len = header_str.chars().count() as u64;
+
+        let header = bincode::serialize(&self.entries)?;
+        let header_len = header.len() as u64;
         ensure!(header_len < HEADER_SIZE as u64, "Too many entries");
-        header_bytes[0..8].copy_from_slice(&header_len.to_be_bytes());
-        header_bytes[8..(8 + header_len as usize)].copy_from_slice(header_str.as_bytes());
-        file.write_all(&header_bytes)?;
+        let padding = vec![0u8; HEADER_SIZE - header_len as usize];
+
+        file.write_all(&header_len.to_be_bytes())?;
+        file.seek(SeekFrom::Start(8))?;
+        file.write_all(&header)?;
+        file.seek(SeekFrom::Start(header_len + 8))?;
+        file.write_all(&padding)?;
+
         Ok(())
     }
 
@@ -141,7 +146,7 @@ impl ArchiveWriter {
         ensure!(!value.is_empty(), "Value is empty");
 
         self.cache.extend_from_slice(value);
-        let entry = EntryMetadata::try_new(self.data_size, self.data_size + value.len()).unwrap();
+        let entry = EntryMetadata::try_new(self.data_size, self.data_size + value.len())?;
         self.data_size = entry.end;
         self.header.insert(key, entry).unwrap();
         Ok(())
@@ -175,15 +180,23 @@ impl ArchiveWriter {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Once;
     use std::{assert_eq, fs};
+
+    static INIT: Once = Once::new();
+
+    fn setup() {
+        INIT.call_once(|| {
+            color_eyre::install().unwrap();
+        });
+    }
 
     #[test]
     fn header_read_write() {
-        color_eyre::install().unwrap();
+        setup();
         let path = "tests/cache/header_read_write.raa";
         let mut header = Header::default();
         let entry = EntryMetadata::try_new(0, 100).unwrap();
@@ -199,17 +212,14 @@ mod tests {
 
     #[test]
     fn archive_flush() {
-        color_eyre::install().unwrap();
+        setup();
         let path = "tests/cache/archive_flush.raa";
         let mut archive = ArchiveWriter::new(path.to_string(), 100);
         let entry = EntryMetadata::try_new(0, 100).unwrap();
         archive.append("dummy", &[0u8; 100]).unwrap();
         archive.flush().unwrap();
         let header = Header::read(path).unwrap();
-        assert_eq!(
-            header.entries.get("dummy").unwrap(),
-            &entry
-        );
+        assert_eq!(header.entries.get("dummy").unwrap(), &entry);
         fs::remove_file(path).unwrap();
     }
 }
