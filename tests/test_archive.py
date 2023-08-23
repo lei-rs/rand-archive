@@ -1,13 +1,13 @@
 import os
 
 import rand_archive as ra
-import pytest
 
 
 def test_archive_double_flush():
     writer = ra.ArchiveWriter(
         'cache/test_pyarchive_double_flush.raa',
-        100
+        100,
+        1000,
     )
     writer.write('dummy', bytes(101))
     writer.write('dummy2', bytes(101))
