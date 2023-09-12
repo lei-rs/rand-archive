@@ -4,33 +4,36 @@ use std::path::Path;
 
 use bincode::Options;
 use color_eyre::eyre::{ensure, eyre, Result, WrapErr};
+use indexmap::map::Slice;
 use indexmap::IndexMap;
 use rand::seq::SliceRandom;
-use rand::SeedableRng;
-use rand_chacha::ChaCha8Rng;
+use rand::{Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EntryMetadata {
-    pub start: usize,
-    pub offset: usize,
+    pub start_idx: usize,
+    pub length: usize,
 }
 
 impl EntryMetadata {
     pub fn try_new(start: usize, offset: usize) -> Result<Self> {
         ensure!(offset > 0, "Size must be greater than 0");
-        Ok(Self { start, offset })
+        Ok(Self {
+            start_idx: start,
+            length: offset,
+        })
     }
 
-    pub fn end(&self) -> usize {
-        self.start + self.offset
+    pub fn end_idx(&self) -> usize {
+        self.start_idx + self.length
     }
 }
 
 #[derive(Clone, Debug)]
 pub struct Header {
-    pub max_size: usize,
-    pub(crate) entries: IndexMap<String, EntryMetadata>,
+    max_size: usize,
+    entries: IndexMap<String, EntryMetadata>,
 }
 
 impl Header {
@@ -49,14 +52,38 @@ impl Header {
             .with_limit(limit)
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn num_entries(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn raw_size(&self) -> usize {
+        self.max_size + 8
+    }
+
     pub(crate) fn insert(&mut self, key: &str, entry: EntryMetadata) -> Result<()> {
         ensure!(!self.entries.contains_key(key), "Key already exists");
         self.entries.insert(key.to_string(), entry);
         Ok(())
     }
 
-    pub fn get(&self, key: &str) -> Option<&EntryMetadata> {
+    pub fn get_key(&self, key: &str) -> Option<&EntryMetadata> {
         self.entries.get(key)
+    }
+
+    pub fn get_index(&self, index: usize) -> Option<(&String, &EntryMetadata)> {
+        self.entries.get_index(index)
+    }
+
+    pub fn get_range(&self, range: (usize, usize)) -> Option<&Slice<String, EntryMetadata>> {
+        self.entries.get_range(range.0..range.1)
+    }
+
+    pub fn entries(&self) -> &IndexMap<String, EntryMetadata> {
+        &self.entries
     }
 
     pub fn read(path: &str) -> Result<Self> {
@@ -87,7 +114,7 @@ impl Header {
                 file.write_all(&vec![0u8; self.max_size + 8])?;
                 file.seek(SeekFrom::Start(0))?;
                 file
-            },
+            }
         };
 
         file.write_all(&self.max_size.to_be_bytes())?;
@@ -99,45 +126,14 @@ impl Header {
 
         Ok(())
     }
-
-    fn collect_block(&self, block_size: usize, first_idx: usize) -> Result<Vec<EntryMetadata>> {
-        let mut entries = Vec::new();
-        let mut size = 0;
-
-        for (_, entry) in self.entries.iter().skip(first_idx) {
-            size += entry.offset;
-            entries.push(entry.clone());
-            if size + entry.offset > block_size {
-                break;
-            }
-        }
-
-        Ok(entries)
-    }
-
-    pub fn block_shuffle(&self, block_size: usize, seed: u64) -> Result<Vec<Vec<EntryMetadata>>> {
-        ensure!(!self.entries.is_empty(), "No entries to shuffle");
-
-        let mut rng = ChaCha8Rng::seed_from_u64(seed);
-        let mut blocks = Vec::new();
-
-        let mut idx = 0;
-        while idx < self.entries.len() {
-            let block = self.collect_block(block_size, idx)?;
-            blocks.push(block);
-            idx += blocks.last().unwrap().len();
-        }
-
-        blocks.shuffle(&mut rng);
-        Ok(blocks)
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::setup;
-    use super::*;
     use std::fs;
+
+    use super::*;
+    use crate::setup;
 
     #[test]
     fn header_read_write() {
