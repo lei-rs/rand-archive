@@ -13,7 +13,7 @@ mod tests {
         setup();
         let path = "tests/cache/test_archive_write.raa";
 
-        let mut archive = ArchiveWriter::try_new(path.to_string(), 100, 1000);
+        let mut archive = ArchiveWriter::new(path.to_string(), 100, 1000).unwrap();
         archive.write("dummy", &[0u8; 100]).unwrap();
         archive.close().unwrap();
 
@@ -31,7 +31,7 @@ mod tests {
         setup();
         let path = "tests/cache/test_archive_read.raa";
 
-        let mut archive = ArchiveWriter::try_new(path.to_string(), 100, 1000);
+        let mut archive = ArchiveWriter::new(path.to_string(), 100, 1000).unwrap();
         archive.write("dummy", &[0u8; 100]).unwrap();
         archive.close().unwrap();
 
@@ -57,7 +57,7 @@ mod tests {
         setup();
         let path = "tests/cache/archive_flush.raa";
 
-        let mut archive = ArchiveWriter::try_new(path.to_string(), 100, 1000);
+        let mut archive = ArchiveWriter::new(path.to_string(), 100, 1000).unwrap();
         archive.write("dummy", &[0u8; 101]).unwrap();
         archive.write("dummy2", &[0u8; 101]).unwrap();
         archive.close().unwrap();
