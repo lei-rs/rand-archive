@@ -1,8 +1,7 @@
-use std::fs::{metadata, OpenOptions};
+use std::fs::{metadata, File, OpenOptions};
 use std::io::Write;
 
-use color_eyre::eyre::{ensure, eyre, Result, WrapErr};
-
+use super::*;
 use crate::header::{EntryMetadata, Header};
 
 #[derive(Clone, Debug)]
@@ -15,7 +14,7 @@ pub struct ArchiveWriter {
 }
 
 impl ArchiveWriter {
-    pub fn try_new(path: String, cache_size: usize, header_max_size: usize) -> Result<Self> {
+    pub fn new(path: String, cache_size: usize, header_max_size: usize) -> Result<Self> {
         ensure!(header_max_size > 0, "Max size must be greater than 0");
         Ok(Self {
             path,
@@ -27,8 +26,9 @@ impl ArchiveWriter {
     }
 
     pub fn load(path: &str, cache_size: usize) -> Result<Self> {
-        let header = Header::read(path)?;
-        let len = metadata(path)?.len() as usize - header.raw_size();
+        let mut file = File::open(path).wrap_err_with(|| format!("Failed to open file from {}", path))?;
+        let header = Header::read(&mut file)?;
+        let len = metadata(path)?.len() as usize - header.byte_size();
         ensure!(len > 0, "Archive has no entries");
         let path = path.to_string();
 
@@ -81,19 +81,22 @@ mod tests {
     use std::{assert_eq, fs};
 
     use super::*;
-    use crate::setup;
+    use crate::test_setup::setup;
 
     #[test]
     fn archive_flush() {
         setup();
         let path = "tests/cache/archive_flush.raa";
-        let mut archive = ArchiveWriter::try_new(path.to_string(), 100, 1000);
+        let mut archive = ArchiveWriter::new(path.to_string(), 100, 1000).unwrap();
         let entry = EntryMetadata::try_new(0, 100).unwrap();
 
         archive.append("dummy", &[0u8; 100]).unwrap();
         archive.flush().unwrap();
 
-        let header = Header::read(path).unwrap();
+        let mut file = File::open(path)
+            .wrap_err_with(|| format!("Failed to open file from {}", path))
+            .unwrap();
+        let header = Header::read(&mut file).unwrap();
         assert_eq!(header.entries().get("dummy").unwrap(), &entry);
 
         fs::remove_file(path).unwrap();

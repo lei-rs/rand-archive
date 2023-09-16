@@ -1,36 +1,40 @@
-use indexmap::map::Slice;
+use std::ops::Range;
 
 use super::*;
 
-macro_rules! vec_raw {
-    ($ptr:expr, $length:expr) => {
-        unsafe { Vec::from_raw_parts($ptr, $length, $length) }
-    };
+pub(crate) struct Block {
+    header: Rc<Header>,
+    range: Range<usize>,
 }
 
-pub struct Block<'a> {
-    start_idx: usize,
-    length: usize,
-    entries: &'a Slice<String, EntryMetadata>,
-}
-
-impl<'a> Block<'a> {
-    pub(crate) fn from_slice(start_idx: usize, entries: &'a Slice<String, EntryMetadata>) -> Self {
-        let length = entries.last().unwrap().1.end_idx() - entries.first().unwrap().1.start_idx;
-        Self {
-            start_idx,
-            length,
-            entries,
-        }
+impl Block {
+    pub(crate) fn from_range(header: Rc<Header>, range: Range<usize>) -> Self {
+        let header = header.clone();
+        Self { header, range }
     }
 
     pub(crate) fn num_entries(&self) -> usize {
-        self.entries.len()
+        self.range.end - self.range.start
     }
 
-    pub(crate) fn read<D: Read + Seek>(&self, data_source: &mut D) -> Result<Box<[u8]>> {
-        let mut buf = vec![0u8; self.length].into_boxed_slice();
-        data_source.seek(SeekFrom::Start(self.start_idx as u64))?;
+    pub(crate) fn len_bytes(&self) -> usize {
+        self.header.entry_end(self.range.end - 1).unwrap()
+            - self.header.entry_start(self.range.start).unwrap()
+    }
+
+    pub(crate) fn range_bytes(&self) -> Range<usize> {
+        self.header.byte_start(self.range.start).unwrap()
+            ..self.header.byte_end(self.range.end - 1).unwrap()
+    }
+
+    pub(crate) fn range_in_buffer(&self, entry: &EntryMetadata) -> Range<usize> {
+        let offset = self.header.entry_start(self.range.start).unwrap();
+        entry.start_idx - offset..entry.end_idx() - offset
+    }
+
+    pub(crate) fn read<D: Read + Seek>(&self, data_source: &mut D) -> Result<Vec<u8>> {
+        let mut buf = vec![0u8; self.len_bytes()];
+        data_source.seek(SeekFrom::Start(self.range_bytes().start as u64))?;
         data_source
             .read_exact(buf.as_mut())
             .map_err(|e| eyre!(e))
@@ -38,13 +42,14 @@ impl<'a> Block<'a> {
         Ok(buf)
     }
 
-    pub(crate) fn to_vec(&self, data: Box<[u8]>) -> Vec<(String, Vec<u8>)> {
-        let base_ptr = Box::into_raw(data) as *mut u8;
-        self.entries
+    pub(crate) fn to_vec(&self, data: Vec<u8>) -> Vec<(String, Vec<u8>)> {
+        self.header
+            .get_range(self.range.clone())
+            .unwrap()
             .iter()
             .map(|(key, entry)| {
-                let start = base_ptr.wrapping_add(entry.start_idx - self.start_idx);
-                (key.to_owned(), vec_raw!(start, entry.length))
+                let range = self.range_in_buffer(entry);
+                (key.to_owned(), data[range].to_vec())
             })
             .collect()
     }

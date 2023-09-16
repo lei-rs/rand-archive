@@ -1,14 +1,14 @@
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::ops::Range;
 use std::path::Path;
 
 use bincode::Options;
-use color_eyre::eyre::{ensure, eyre, Result, WrapErr};
 use indexmap::map::Slice;
 use indexmap::IndexMap;
-use rand::seq::SliceRandom;
-use rand::{Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
+
+use super::*;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EntryMetadata {
@@ -60,14 +60,24 @@ impl Header {
         self.entries.len()
     }
 
-    pub fn raw_size(&self) -> usize {
+    pub fn entry_start(&self, idx: usize) -> Option<usize> {
+        self.entries.get_index(idx).map(|(_, entry)| entry.start_idx)
+    }
+
+    pub fn entry_end(&self, idx: usize) -> Option<usize> {
+        self.entries.get_index(idx).map(|(_, entry)| entry.end_idx())
+    }
+
+    pub fn byte_size(&self) -> usize {
         self.max_size + 8
     }
 
-    pub(crate) fn insert(&mut self, key: &str, entry: EntryMetadata) -> Result<()> {
-        ensure!(!self.entries.contains_key(key), "Key already exists");
-        self.entries.insert(key.to_string(), entry);
-        Ok(())
+    pub fn byte_start(&self, idx: usize) -> Option<usize> {
+        self.entry_start(idx).map(|start| start + self.byte_size())
+    }
+
+    pub fn byte_end(&self, idx: usize) -> Option<usize> {
+        self.entry_end(idx).map(|end| end + self.byte_size())
     }
 
     pub fn get_key(&self, key: &str) -> Option<&EntryMetadata> {
@@ -78,31 +88,37 @@ impl Header {
         self.entries.get_index(index)
     }
 
-    pub fn get_range(&self, range: (usize, usize)) -> Option<&Slice<String, EntryMetadata>> {
-        self.entries.get_range(range.0..range.1)
+    pub fn get_range(&self, range: Range<usize>) -> Option<&Slice<String, EntryMetadata>> {
+        self.entries.get_range(range)
     }
 
     pub fn entries(&self) -> &IndexMap<String, EntryMetadata> {
         &self.entries
     }
 
-    pub fn read(path: &str) -> Result<Self> {
-        let path = Path::new(path);
-        ensure!(path.exists(), "File does not exist");
-        let mut file = File::open(path)?;
-
+    pub fn read<D: Read + Seek>(data: &mut D) -> Result<Self> {
         let mut max_size = [0u8; 8];
-        file.read_exact(&mut max_size)?;
+        data.read_exact(&mut max_size)?;
         let max_size = u64::from_be_bytes(max_size) as usize;
-        file.seek(SeekFrom::Start(8))?;
+        data.seek(SeekFrom::Start(8))?;
 
         ensure!(max_size > 0, "Archive has no entries");
+        let mut buf = vec![0u8; max_size];
+        data.seek(SeekFrom::Start(8))?;
+        data.read_exact(&mut buf)?;
         let entries = Header::get_options(max_size as u64)
-            .deserialize_from(&mut file)
+            .deserialize(&buf)
             .map_err(|e| eyre!(e))
             .wrap_err("Failed to read header")?;
 
+        data.seek(SeekFrom::Start(8 + max_size as u64))?;
         Ok(Self { max_size, entries })
+    }
+
+    pub(crate) fn insert(&mut self, key: &str, entry: EntryMetadata) -> Result<()> {
+        ensure!(!self.entries.contains_key(key), "Key already exists");
+        self.entries.insert(key.to_string(), entry);
+        Ok(())
     }
 
     pub(crate) fn write(&self, path: &str) -> Result<()> {
@@ -133,7 +149,7 @@ mod tests {
     use std::fs;
 
     use super::*;
-    use crate::setup;
+    use crate::test_setup::setup;
 
     #[test]
     fn header_read_write() {
@@ -145,7 +161,10 @@ mod tests {
         header.insert("dummy", entry).unwrap();
         header.write(path).unwrap();
 
-        let header_back = Header::read(path).unwrap();
+        let mut file = File::open(path)
+            .wrap_err_with(|| format!("Failed to open file from {}", path))
+            .unwrap();
+        let header_back = Header::read(&mut file).unwrap();
         assert_eq!(
             header.entries.get("dummy").unwrap(),
             header_back.entries.get("dummy").unwrap()

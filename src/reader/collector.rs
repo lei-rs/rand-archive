@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::cmp::min;
 
 use super::*;
@@ -10,41 +11,38 @@ pub(crate) enum CollectorCriteria {
 
 impl Default for CollectorCriteria {
     fn default() -> Self {
-        Self::Size(4 * 1024)
+        Self::Size(100 * 1024)
     }
 }
 
 impl CollectorCriteria {
-    fn size_collect_block(header: &Header, block_size: usize, start: usize) -> Result<Block> {
-        let first = header.get_index(start).ok_or(eyre!("Index out of bounds"))?.1;
+    fn size_collect_block(header: Rc<Header>, block_size: usize, start: usize) -> Result<Block> {
         let mut size = 0;
-        let end = header
-            .entries()
-            .get_range(start..start + header.num_entries())
+        let range_size = header
+            .get_range(start..header.num_entries())
             .ok_or(eyre!("Index out of bounds"))?
             .iter()
-            .take_while(|(key, entry)| {
+            .take_while(|(_, entry)| {
                 size += entry.length;
                 size <= block_size
             })
-            .count();
-        ensure!(end > 0, "Block size too small");
-        Ok(Block::from_slice(
-            first.start_idx + header.raw_size(),
-            header.entries().get_range(start..start + end).unwrap(),
+            .count().max(1);
+        ensure!(range_size > 0, "Block size too small");
+        Ok(Block::from_range(
+            header,
+            start..start + range_size,
         ))
     }
 
-    fn count_collect_block(header: &Header, num_entries: usize, start: usize) -> Result<Block> {
-        let first = header.get_index(start).ok_or(eyre!("Index out of bounds"))?.1;
+    fn count_collect_block(header: Rc<Header>, num_entries: usize, start: usize) -> Result<Block> {
         let end = min(start + num_entries, header.num_entries());
-        Ok(Block::from_slice(
-            first.start_idx + header.raw_size(),
-            header.entries().get_range(start..end).unwrap(),
+        Ok(Block::from_range(
+            header,
+            start..end,
         ))
     }
 
-    fn collect<'a>(&self, header: &'a Header, start: usize) -> Result<Block<'a>> {
+    fn collect(&self, header: Rc<Header>, start: usize) -> Result<Block> {
         match self {
             CollectorCriteria::Size(n) => Self::size_collect_block(header, *n, start),
             CollectorCriteria::Count(n) => Self::count_collect_block(header, *n, start),
@@ -52,45 +50,32 @@ impl CollectorCriteria {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct Collector {
     pub(crate) criteria: CollectorCriteria,
     pub(crate) shuffle: bool,
     pub(crate) shard: Option<(u16, u16)>,
 }
 
-impl Default for Collector {
-    fn default() -> Self {
-        Self {
-            criteria: CollectorCriteria::default(),
-            shuffle: false,
-            shard: None,
-        }
-    }
-}
-
 impl Collector {
-    fn collect<'a>(&'a self, header: &'a Header) -> Result<Vec<Block>> {
+    fn collect(&self, header: Rc<Header>) -> Result<Vec<Block>> {
         let entries = header.entries();
         let mut blocks = Vec::new();
         let mut start = 0usize;
         while start < entries.len() {
-            let block = self.criteria.collect(header, start)?;
+            let block = self.criteria.collect(header.clone(), start)?;
             start += block.num_entries();
             blocks.push(block);
         }
         Ok(blocks)
     }
 
-    pub(crate) fn as_iter<'a, D>(
-        &'a self,
-        header: &'a Header,
-        data: &'a mut D,
-    ) -> impl Iterator<Item = (String, Vec<u8>)> + '_
+    pub(crate) fn to_iter<D>(self, header: &Rc<Header>, data: &Rc<RefCell<D>>) -> impl Iterator<Item = (String, Vec<u8>)>
     where
-        D: Read + Seek + 'a,
+        D: Read + Seek,
     {
-        let blocks = self.collect(header).unwrap();
+        let data = data.clone();
+        let blocks = Rc::new(self.collect(header.clone()).unwrap());
         let mut indices = (0..blocks.len()).collect::<Vec<_>>();
         if self.shuffle {
             indices.shuffle(&mut rand::thread_rng());
@@ -103,8 +88,12 @@ impl Collector {
             None => indices,
         };
         indices.into_iter().flat_map(move |i| {
-            let block = &blocks[i];
-            block.to_vec(block.read(data).unwrap()).into_iter()
+            let blocks = blocks.clone();
+            let block = blocks.get(i).unwrap();
+            let data = &mut *data.borrow_mut();
+            block
+                .to_vec(block.read(data).unwrap())
+                .into_iter()
         })
     }
 }
