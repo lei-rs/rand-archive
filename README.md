@@ -6,3 +6,14 @@ The main advantage of this library, is how extensible it is. Other libraries lik
 
 ## Benchmarks:
 !todo
+
+# Usage
+## Writing:
+```python
+from rand_archive import Writer
+
+with Writer("test.raa") as w:
+  w.write("test", bytes("test"))
+```
+## Reading
+!todo
