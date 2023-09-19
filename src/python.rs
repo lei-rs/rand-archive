@@ -1,25 +1,27 @@
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 
-use indexmap::IndexMap;
+use bytes::Bytes;
+use pyo3::exceptions::PyKeyError;
 use pyo3::prelude::*;
-use pyo3::types::{PyTuple, PyType};
+use pyo3::PyErr;
+use pyo3::types::{PyBytes, PyTuple, PyType};
+
+use crate::archive::Writer;
+use crate::header::{Header, SampleMD};
+use crate::reader::{DataSource, Reader};
 
 use super::*;
-use crate::archive::ArchiveWriter;
-use crate::header::{EntryMetadata, Header};
-use crate::reader::readers::Reader;
 
 const DEF_CACHE_SIZE: usize = 100 * 1024 * 1024;
 const DEF_HEADER_SIZE: usize = 1024 * 1024;
 
-impl IntoPy<PyObject> for EntryMetadata {
-    fn into_py(self, py: Python<'_>) -> PyObject {
-        PyTuple::new(py, [self.start_idx, self.length]).into_py(py)
+impl IntoPy<PyObject> for SampleMD {
+    fn into_py(self, py: Python) -> PyObject {
+        PyTuple::new(py, [self.start_idx(), self.length()]).into_py(py)
     }
 }
 
 #[pyclass(name = "Header")]
-#[derive(Clone, Debug)]
 pub struct PyHeader {
     inner: Header,
 }
@@ -32,7 +34,7 @@ impl PyHeader {
     }
 
     #[classmethod]
-    fn read(cls: &PyType, path: &str) -> PyResult<Self> {
+    fn load(cls: &PyType, path: &str) -> PyResult<Self> {
         let mut file = OpenOptions::new()
             .read(true)
             .open(path)
@@ -42,50 +44,118 @@ impl PyHeader {
         Ok(PyHeader { inner })
     }
 
-    fn inner(&self, py: Python) -> IndexMap<String, PyObject> {
-        let mut im = IndexMap::new();
-        for (key, value) in self.inner.entries().iter() {
-            im.insert(key.clone(), value.clone().into_py(py));
-        }
-        im
+    fn __repr__(&self) -> String {
+        format!("{}", self.inner)
+    }
+
+    fn __str__(&self) -> String {
+        self.inner.to_string()
+    }
+
+    fn __len__(&self) -> usize {
+        self.inner.len()
+    }
+
+    fn __contains__(&self, key: &str) -> bool {
+        self.inner.entries().contains_key(key)
+    }
+
+    fn __getitem__(&self, py: Python, key: &str) -> PyResult<PyObject> {
+        self.inner
+            .get_key(key)
+            .ok_or(PyErr::new::<PyKeyError, _>(format!("Key {} not found", key)))
+            .map(|v| v.clone().into_py(py))
     }
 }
 
-#[pyclass(name = "ArchiveWriter")]
-#[derive(Clone, Debug)]
-pub struct PyArchiveWriter {
-    inner: ArchiveWriter,
+#[pyclass(name = "Writer")]
+pub struct PyWriter {
+    inner: Writer,
 }
 
 #[pymethods]
-impl PyArchiveWriter {
+impl PyWriter {
     #[new]
     #[pyo3(signature = (path, cache_size=DEF_CACHE_SIZE, max_header_size=DEF_HEADER_SIZE))]
     fn new(path: String, cache_size: usize, max_header_size: usize) -> Result<Self> {
+        let file = OpenOptions::new().write(true).create_new(true).open(path)?;
         Ok(Self {
-            inner: ArchiveWriter::new(path, cache_size, max_header_size)?,
+            inner: Writer::new(file, cache_size, max_header_size)?,
         })
     }
 
     #[classmethod]
     #[pyo3(signature = (path, cache_size=DEF_CACHE_SIZE))]
     fn load(cls: &PyType, path: &str, cache_size: usize) -> Result<Self> {
-        let inner = ArchiveWriter::load(path, cache_size)?;
-        Ok(PyArchiveWriter { inner })
+        let file = OpenOptions::new().read(true).write(true).open(path)?;
+        let inner = Writer::load(file, cache_size)?;
+        Ok(PyWriter { inner })
     }
 
-    fn write(&mut self, key: &str, value: &[u8]) -> PyResult<()> {
-        self.inner.write(key, value).map_err(|e| e.into())
+    fn write(&mut self, key: &str, value: &[u8]) -> Result<()> {
+        self.inner.write(key, value)
     }
 
-    fn close(&mut self) -> PyResult<()> {
-        self.inner.close().map_err(|e| e.into())
+    fn close(&mut self) -> Result<()> {
+        self.inner.close()
+    }
+
+    fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __exit__(mut slf: PyRefMut<'_, Self>, exc_type: &PyAny, exc_value: &PyAny, exc_traceback: &PyAny) -> Result<()> {
+        slf.close()
+    }
+}
+
+#[pyclass[name = "Reader", unsendable]]
+struct PyReader {
+    inner: Reader,
+}
+
+#[pymethods]
+impl PyReader {
+    #[new]
+    fn new() -> Self {
+        Self { inner: Reader::new() }
+    }
+
+    fn open_file(mut slf: PyRefMut<'_, Self>, path: String) -> Result<PyRefMut<'_, Self>> {
+        slf.inner.open_file(&path)?;
+        Ok(slf)
+    }
+
+    fn by_size(mut slf: PyRefMut<'_, Self>, size: usize) -> PyRefMut<'_, Self> {
+        slf.inner.by_size(size);
+        slf
+    }
+
+    fn by_count(mut slf: PyRefMut<'_, Self>, count: usize) -> PyRefMut<'_, Self> {
+        slf.inner.by_count(count);
+        slf
+    }
+
+    fn with_shuffling(mut slf: PyRefMut<'_, Self>) -> PyRefMut<'_, Self> {
+        slf.inner.with_shuffling();
+        slf
+    }
+
+    fn with_sharding(mut slf: PyRefMut<'_, Self>, rank: u16, world_size: u16) -> Result<PyRefMut<'_, Self>> {
+        slf.inner.with_sharding(rank, world_size)?;
+        Ok(slf)
+    }
+
+    fn __iter__(slf: PyRef<'_, Self>) -> Result<EntryIter> {
+        Ok(EntryIter {
+            iter: Box::new(slf.inner.iter()?),
+        })
     }
 }
 
 #[pyclass(unsendable)]
 struct EntryIter {
-    iter: Option<Box<dyn Iterator<Item = (String, Vec<u8>)>>>,
+    iter: Box<dyn Iterator<Item = (String, Bytes)>>,
 }
 
 #[pymethods]
@@ -95,46 +165,23 @@ impl EntryIter {
     }
 
     fn __next__(mut slf: PyRefMut<'_, Self>) -> Option<PyObject> {
-        match slf.iter.as_mut().unwrap().next() {
-            Some((key, value)) => {
-                Python::with_gil(|gil| {
-                    let key = key.to_object(gil);
-                    let value = value.to_object(gil);
-                    let tuple = PyTuple::new(gil, [key, value]);
-                    Some(tuple.into_py(gil))
-                })
-            },
+        match slf.iter.next() {
+            Some((key, value)) => Python::with_gil(|gil| {
+                let key = key.to_object(gil);
+                let value = PyBytes::new(gil, &value).into_py(gil);
+                let tuple = PyTuple::new(gil, [key, value]);
+                Some(tuple.into_py(gil))
+            }),
             None => None,
         }
-    }
-}
-
-#[pyclass(name = "FileReader", unsendable)]
-struct PyReader {
-    inner: Box<dyn Reader>,
-}
-
-#[pymethods]
-impl PyReaderFile {
-    #[new]
-    fn new(path: &str) -> Result<Self> {
-        let inner = Reader::open(path)?;
-        Ok(Self { inner })
-    }
-
-    fn __iter__(slf: PyRef<'_, Self>) -> PyResult<Py<EntryIter>> {
-        let iter = EntryIter {
-            iter: Some(Box::new(slf.inner.to_iter())),
-        };
-        Py::new(slf.py(), iter)
     }
 }
 
 #[pymodule]
 fn rand_archive(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<PyHeader>()?;
-    m.add_class::<PyArchiveWriter>()?;
+    m.add_class::<PyWriter>()?;
+    m.add_class::<PyReader>()?;
     m.add_class::<EntryIter>()?;
-    m.add_class::<PyReaderFile>()?;
     Ok(())
 }

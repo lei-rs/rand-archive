@@ -4,7 +4,7 @@ import rand_archive as ra
 
 
 def test_archive_double_flush():
-    writer = ra.ArchiveWriter(
+    writer = ra.Writer(
         'cache/test_pyarchive_double_flush.raa',
         100,
         1000,

@@ -1,6 +1,8 @@
 /target
-/Cargo.lock
+Cargo.lock
 /.idea
 /localdata
 creds.json
 .DS_Store
+*.ipynb
+*.raa
