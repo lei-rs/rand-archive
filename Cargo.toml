@@ -17,7 +17,7 @@ either = "1.9.0"
 futures = "0.3.28"
 gcs-reader = { version = "0.1.0", optional = true }
 indexmap = { version = "2.0.0", features = ["serde"] }
-openssl-sys = "0.9.92"
+openssl-sys = "=0.9.92"
 pyo3 = { version = "0.19.0", features = ["serde", "indexmap", "eyre"] }
 rand = "0.8.5"
 serde = { version = "1.0.183", features = ["derive"]}
