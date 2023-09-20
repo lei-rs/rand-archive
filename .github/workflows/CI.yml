@@ -25,6 +25,8 @@ jobs:
       matrix:
         target: [x86_64, aarch64]
     steps:
+      - name: Install OpenSSL
+        run: sudo apt-get install pkg-config libssl-dev
       - uses: actions/checkout@v3
       - uses: actions/setup-python@v4
         with:
@@ -90,8 +92,6 @@ jobs:
   sdist:
     runs-on: ubuntu-latest
     steps:
-      - name: Install OpenSSL
-        run: sudo apt-get install pkg-config libssl-dev
       - uses: actions/checkout@v3
       - name: Build sdist
         uses: PyO3/maturin-action@v1
