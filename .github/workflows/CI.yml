@@ -90,6 +90,8 @@ jobs:
   sdist:
     runs-on: ubuntu-latest
     steps:
+      - name: Install OpenSSL
+        run: sudo apt-get install pkg-config libssl-dev
       - uses: actions/checkout@v3
       - name: Build sdist
         uses: PyO3/maturin-action@v1
