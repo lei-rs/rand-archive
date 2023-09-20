@@ -1,14 +1,14 @@
 use std::vec::IntoIter;
 
 use futures::{Future, stream, StreamExt};
-use futures::stream::{Buffered, Iter};
+use futures::stream::{BufferUnordered, Iter};
 use tokio::runtime::{Builder, Runtime};
 
 pub(crate) struct BoundedIter<F>
 where
     F: Future,
 {
-    iter: Buffered<Iter<IntoIter<F>>>,
+    iter: BufferUnordered<Iter<IntoIter<F>>>,
     rt: Runtime
 }
 
@@ -19,7 +19,7 @@ where
     pub(crate) fn from_vec(vec: Vec<F>, limit: usize) -> Self {
         let stream = stream::iter(vec);
         BoundedIter {
-            iter: stream.buffered(limit),
+            iter: stream.buffer_unordered(limit),
             rt: Builder::new_current_thread().enable_io().build().unwrap()
         }
     }
