@@ -16,4 +16,9 @@ with Writer("test.raa") as w:
   w.write("test", bytes("test"))
 ```
 ## Reading
-!todo
+```python
+from rand_archive import Reader
+
+for _ in Reader().open_file("dummy.raa").with_shuffling():
+  pass
+```
