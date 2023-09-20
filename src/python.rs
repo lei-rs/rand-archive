@@ -3,14 +3,13 @@ use std::fs::OpenOptions;
 use bytes::Bytes;
 use pyo3::exceptions::PyKeyError;
 use pyo3::prelude::*;
-use pyo3::PyErr;
 use pyo3::types::{PyBytes, PyTuple, PyType};
-
-use crate::archive::Writer;
-use crate::header::{Header, SampleMD};
-use crate::reader::{DataSource, Reader};
+use pyo3::PyErr;
 
 use super::*;
+use crate::archive::Writer;
+use crate::header::{Header, SampleMD};
+use crate::reader::Reader;
 
 const DEF_CACHE_SIZE: usize = 100 * 1024 * 1024;
 const DEF_HEADER_SIZE: usize = 1024 * 1024;
@@ -38,7 +37,7 @@ impl PyHeader {
         let mut file = OpenOptions::new()
             .read(true)
             .open(path)
-            .wrap_err_with(|| format!("Failed to open file from {}", path))
+            .wrap_err_with(|| format!("Failed to open file from {path}"))
             .unwrap();
         let inner = Header::read(&mut file)?;
         Ok(PyHeader { inner })
@@ -63,7 +62,7 @@ impl PyHeader {
     fn __getitem__(&self, py: Python, key: &str) -> PyResult<PyObject> {
         self.inner
             .get_key(key)
-            .ok_or(PyErr::new::<PyKeyError, _>(format!("Key {} not found", key)))
+            .ok_or(PyErr::new::<PyKeyError, _>(format!("Key {key} not found")))
             .map(|v| v.clone().into_py(py))
     }
 }
@@ -121,8 +120,14 @@ impl PyReader {
         Self { inner: Reader::new() }
     }
 
-    fn open_file(mut slf: PyRefMut<'_, Self>, path: String) -> Result<PyRefMut<'_, Self>> {
-        slf.inner.open_file(&path)?;
+    fn open_file<'a>(mut slf: PyRefMut<'a, Self>, path: &str) -> Result<PyRefMut<'a, Self>> {
+        slf.inner.open_file(path)?;
+        Ok(slf)
+    }
+
+    #[cfg(feature = "gcs")]
+    fn open_gcs<'a>(mut slf: PyRefMut<'a, Self>, uri: &str) -> Result<PyRefMut<'a, Self>> {
+        slf.inner.open_gcs(uri)?;
         Ok(slf)
     }
 
@@ -136,8 +141,9 @@ impl PyReader {
         slf
     }
 
-    fn with_shuffling(mut slf: PyRefMut<'_, Self>) -> PyRefMut<'_, Self> {
-        slf.inner.with_shuffling();
+    #[pyo3(text_signature = "(self, /, *, seed=None)")]
+    fn with_shuffling(mut slf: PyRefMut<'_, Self>, seed: Option<u64>) -> PyRefMut<'_, Self> {
+        slf.inner.with_shuffling(seed);
         slf
     }
 
@@ -146,9 +152,14 @@ impl PyReader {
         Ok(slf)
     }
 
-    fn __iter__(slf: PyRef<'_, Self>) -> Result<EntryIter> {
+    fn with_buffering(mut slf: PyRefMut<'_, Self>, buffer_size: u32) -> Result<PyRefMut<'_, Self>> {
+        slf.inner.with_buffering(buffer_size)?;
+        Ok(slf)
+    }
+
+    fn __iter__(&self) -> Result<EntryIter> {
         Ok(EntryIter {
-            iter: Box::new(slf.inner.iter()?),
+            iter: Box::new(self.inner.iter()?),
         })
     }
 }

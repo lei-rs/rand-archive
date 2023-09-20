@@ -1,35 +1,23 @@
 use std::fs::File;
+use std::rc::Rc;
 
+use bytes::Bytes;
+use color_eyre::eyre::{ensure, eyre, Result, WrapErr};
 #[cfg(feature = "gcs")]
 use gcs_reader::{Auth, GCSReader};
-#[cfg(feature = "s3")]
-use s3reader::{S3ObjectUri, S3Reader};
 
-use super::*;
+use crate::header::Header;
 use crate::reader::collector::Collector;
+use crate::reader::datasource::DataSource;
 
 pub type Sample = (String, Bytes);
-pub type HeaderRc = Rc<Header>;
-pub type DataSourceRc = Rc<RefCell<dyn DataSource>>;
-
-pub trait DataSource {
-    fn get_range(&mut self, range: Range<usize>) -> Result<Bytes>;
-}
-
-impl<T: Read + Seek + 'static> DataSource for T {
-    fn get_range(&mut self, range: Range<usize>) -> Result<Bytes> {
-        let mut buf = BytesMut::zeroed(range.len());
-        self.seek(SeekFrom::Start(range.start as u64))?;
-        self.read_exact(&mut buf)?;
-        Ok(buf.freeze())
-    }
-}
+pub type RcHeader = Rc<Header>;
 
 #[derive(Default)]
 pub struct Reader {
     collector: Collector,
-    header: Option<HeaderRc>,
-    datasource: Option<DataSourceRc>,
+    header: Option<RcHeader>,
+    datasource: Option<DataSource>,
 }
 
 impl Reader {
@@ -41,7 +29,7 @@ impl Reader {
         let mut data = File::open(path).wrap_err_with(|| format!("Failed to open file from {}", path))?;
         let header = Header::read(&mut data)?;
         self.header = Some(Rc::new(header));
-        self.datasource = Some(Rc::new(RefCell::new(data)));
+        self.datasource = Some(DataSource::new_sync(data));
         Ok(self)
     }
 
@@ -55,8 +43,8 @@ impl Reader {
         self
     }
 
-    pub fn with_shuffling(&mut self) -> &mut Self {
-        self.collector.with_shuffling();
+    pub fn with_shuffling(&mut self, seed: Option<u64>) -> &mut Self {
+        self.collector.with_shuffling(seed);
         self
     }
 
@@ -65,10 +53,19 @@ impl Reader {
         Ok(self)
     }
 
+    pub fn with_buffering(&mut self, buffer_size: u32) -> Result<&mut Self> {
+        ensure!(
+            self.datasource.as_ref().unwrap().is_async(),
+            eyre!("Buffering is only supported for async datasources")
+        );
+        self.collector.with_buffering(buffer_size);
+        Ok(self)
+    }
+
     pub fn iter(&self) -> Result<impl Iterator<Item = Sample>> {
         let header = self.header.clone().ok_or(eyre!("Unopened"))?;
         let datasource = self.datasource.clone().unwrap();
-        self.collector.iter(header, datasource)
+        Ok(self.collector.iter(header, datasource))
     }
 }
 
@@ -78,19 +75,7 @@ impl Reader {
         let mut data = GCSReader::from_uri(uri, Auth::default())?;
         let header = Header::read(&mut data)?;
         self.header = Some(Rc::new(header));
-        self.datasource = Some(Rc::new(RefCell::new(data)));
-        Ok(self)
-    }
-}
-
-#[cfg(feature = "s3")]
-impl Reader {
-    pub fn open_s3(&mut self, uri: &str) -> Result<&mut Self> {
-        let uri_obj = S3ObjectUri::new(uri).wrap_err_with(|| format!("Failed to parse S3 URI {}", uri))?;
-        let mut data = S3Reader::open(uri_obj).wrap_err_with(|| format!("Failed to open file from {}", uri))?;
-        let header = Header::read(&mut data)?;
-        self.header = Some(Rc::new(header));
-        self.datasource = Some(Rc::new(RefCell::new(data)));
+        self.datasource = Some(DataSource::new_async(data));
         Ok(self)
     }
 }

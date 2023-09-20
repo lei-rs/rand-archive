@@ -13,4 +13,4 @@ classifiers = [
 [tool.maturin]
 bindings = "pyo3"
 strip = true
-features = ["pyo3/extension-module"]
+features = ["pyo3/extension-module", "gcs"]

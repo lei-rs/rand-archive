@@ -1,8 +1,16 @@
 use std::cmp::min;
 
+use color_eyre::eyre::{ensure, eyre, Result};
 use either::Either;
+use rand::SeedableRng;
+use rand::seq::SliceRandom;
+use thiserror::Error;
 
-use super::*;
+use crate::reader::block::Block;
+use crate::reader::blocking::BoundedIter;
+use crate::reader::datasource::DataSource;
+use crate::reader::readers::RcHeader;
+use crate::reader::Sample;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum CollectorCriteria {
@@ -12,12 +20,12 @@ pub(crate) enum CollectorCriteria {
 
 impl Default for CollectorCriteria {
     fn default() -> Self {
-        Self::Size(100 * 1024)
+        Self::Count(1)
     }
 }
 
 impl CollectorCriteria {
-    fn size_collect_block(header: Rc<Header>, block_size: usize, start: usize) -> Result<Block> {
+    fn size_collect_block(header: RcHeader, block_size: usize, start: usize) -> Result<Block> {
         let mut size = 0;
         let range_size = header
             .get_range(start..header.len())
@@ -32,32 +40,33 @@ impl CollectorCriteria {
         Ok(Block::from_range(header, start..start + range_size))
     }
 
-    fn count_collect_block(header: Rc<Header>, num_entries: usize, start: usize) -> Result<Block> {
+    fn count_collect_block(header: RcHeader, num_entries: usize, start: usize) -> Block {
         let end = min(start + num_entries, header.len());
-        Ok(Block::from_range(header, start..end))
+        Block::from_range(header, start..end)
     }
 
-    fn collect(&self, header: Rc<Header>, start: usize) -> Result<Block> {
+    fn collect(&self, header: RcHeader, start: usize) -> Result<Block> {
         match self {
             CollectorCriteria::Size(n) => Self::size_collect_block(header, *n, start),
-            CollectorCriteria::Count(n) => Self::count_collect_block(header, *n, start),
+            CollectorCriteria::Count(n) => Ok(Self::count_collect_block(header, *n, start)),
         }
     }
 }
 
 #[derive(Error, Debug)]
-pub enum ShardingError {
-    #[error("rank must be less than world_size, got rank: {0}, world_size: {1}")]
+pub enum CollectorError {
+    #[error("Rank must be less than world_size, got rank: {0}, world_size: {1}")]
     InvalidRank(u16, u16),
-    #[error("world_size must be greater than 0, got world_size: {0}")]
+    #[error("World_size must be greater than 0, got world_size: {0}")]
     InvalidWorldSize(u16),
 }
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct Collector {
     criteria: CollectorCriteria,
-    shuffle: bool,
+    shuffle: Option<u64>,
     shard: Option<(u16, u16)>,
+    buffer_size: Option<u32>,
 }
 
 impl Collector {
@@ -71,19 +80,24 @@ impl Collector {
         self
     }
 
-    pub(crate) fn with_shuffling(&mut self) -> &mut Self {
-        self.shuffle = true;
+    pub(crate) fn with_shuffling(&mut self, seed: Option<u64>) -> &mut Self {
+        self.shuffle = seed;
         self
     }
 
     pub(crate) fn with_sharding(&mut self, rank: u16, world_size: u16) -> Result<&mut Self> {
-        ensure!(rank < world_size, ShardingError::InvalidRank(rank, world_size));
-        ensure!(world_size > 0, ShardingError::InvalidWorldSize(world_size));
+        ensure!(rank < world_size, CollectorError::InvalidRank(rank, world_size));
+        ensure!(world_size > 0, CollectorError::InvalidWorldSize(world_size));
         self.shard = Some((rank, world_size));
         Ok(self)
     }
 
-    fn collect(&self, header: Rc<Header>) -> Result<Vec<Block>> {
+    pub(crate) fn with_buffering(&mut self, buffer_size: u32) -> &mut Self {
+        self.buffer_size = Some(buffer_size);
+        self
+    }
+
+    fn collect(&self, header: RcHeader) -> Result<Vec<Block>> {
         let entries = header.entries();
         let mut blocks = Vec::new();
         let mut start = 0usize;
@@ -95,10 +109,11 @@ impl Collector {
         Ok(blocks)
     }
 
-    fn iter_blocks(&self, header: Rc<Header>) -> Result<impl Iterator<Item = Block>> {
+    fn iter_blocks(&self, header: RcHeader) -> Result<impl Iterator<Item = Block>> {
         let mut blocks = self.collect(header.clone())?;
-        if self.shuffle {
-            blocks.shuffle(&mut rand::thread_rng());
+        if let Some(seed) = self.shuffle {
+            let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+            blocks.shuffle(&mut rng);
         }
         let iter = blocks.into_iter();
         match self.shard {
@@ -111,13 +126,25 @@ impl Collector {
         }
     }
 
-    pub(crate) fn iter<D>(&self, header: Rc<Header>, data: Rc<RefCell<D>>) -> Result<impl Iterator<Item = Sample>>
+    fn add_buffering<I>(&self, data: DataSource, block_iter: I) -> impl Iterator<Item = Result<Block>>
     where
-        D: DataSource + ?Sized,
+        I: Iterator<Item = Block>,
     {
-        Ok(self.iter_blocks(header)?.flat_map(move |block| {
-            let data = &mut *data.borrow_mut();
-            block.to_vec(block.read(data).unwrap()).unwrap().into_iter()
-        }))
+        let ds = data.into_async().unwrap();
+        let futures = block_iter.map(|block| block.read_async(ds.clone())).collect();
+        BoundedIter::from_vec(futures, self.buffer_size.unwrap() as usize)
+    }
+
+    pub(crate) fn iter(&self, header: RcHeader, data: DataSource) -> impl Iterator<Item = Sample> {
+        match self.buffer_size {
+            Some(_) => Either::Left(
+                self.add_buffering(data, self.iter_blocks(header).unwrap())
+                    .flat_map(|block| block.unwrap().to_vec().unwrap().into_iter()),
+            ),
+            None => Either::Right(self.iter_blocks(header).unwrap().flat_map(move |block| {
+                let data = data.clone().into_sync().unwrap();
+                block.read(data).unwrap().to_vec().unwrap().into_iter()
+            })),
+        }
     }
 }
