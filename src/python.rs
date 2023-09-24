@@ -1,4 +1,5 @@
 use std::fs::OpenOptions;
+use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use pyo3::exceptions::PyKeyError;
@@ -159,14 +160,14 @@ impl PyReader {
 
     fn __iter__(&self) -> Result<EntryIter> {
         Ok(EntryIter {
-            iter: Box::new(self.inner.iter()?),
+            iter: Arc::new(Mutex::new(self.inner.iter()?)),
         })
     }
 }
 
-#[pyclass(unsendable)]
+#[pyclass]
 struct EntryIter {
-    iter: Box<dyn Iterator<Item = (String, Bytes)>>,
+    iter: Arc<Mutex<dyn Iterator<Item = (String, Bytes)>>>,
 }
 
 #[pymethods]
@@ -176,7 +177,7 @@ impl EntryIter {
     }
 
     fn __next__(mut slf: PyRefMut<'_, Self>) -> Option<PyObject> {
-        match slf.iter.next() {
+        match slf.iter.lock().unwrap().next() {
             Some((key, value)) => Python::with_gil(|gil| {
                 let key = key.to_object(gil);
                 let value = PyBytes::new(gil, &value).into_py(gil);
@@ -187,6 +188,9 @@ impl EntryIter {
         }
     }
 }
+
+unsafe impl Send for EntryIter {}
+unsafe impl Sync for EntryIter {}
 
 #[pymodule]
 fn rand_archive(_py: Python, m: &PyModule) -> PyResult<()> {

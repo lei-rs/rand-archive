@@ -33,6 +33,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
+          manylinux: auto
           args: --release --out dist --find-interpreter
           before-script-linux: |
             if command -v yum &> /dev/null; then
@@ -44,7 +45,6 @@ jobs:
                 apt update -y && apt-get install -y libssl-dev openssl pkg-config
             fi
           sccache: 'true'
-          manylinux: auto
       - name: Upload wheels
         uses: actions/upload-artifact@v3
         with:

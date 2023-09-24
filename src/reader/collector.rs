@@ -7,7 +7,7 @@ use rand::seq::SliceRandom;
 use thiserror::Error;
 
 use crate::reader::block::Block;
-use crate::reader::blocking::BoundedIter;
+use crate::reader::bounded::BoundedIter;
 use crate::reader::datasource::DataSource;
 use crate::reader::readers::RcHeader;
 use crate::reader::Sample;
