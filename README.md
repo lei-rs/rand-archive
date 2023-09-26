@@ -8,6 +8,10 @@ The main advantage of this library, is how extensible it is. Other libraries lik
 !todo
 
 # Usage
+```
+pip install rand-archive
+```
+
 ## Writing:
 ```python
 from rand_archive import Writer
