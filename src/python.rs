@@ -192,11 +192,17 @@ impl EntryIter {
 unsafe impl Send for EntryIter {}
 unsafe impl Sync for EntryIter {}
 
+#[pyfunction]
+fn __setup() -> Result<()> {
+    color_eyre::install()
+}
+
 #[pymodule]
 fn rand_archive(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<PyHeader>()?;
     m.add_class::<PyWriter>()?;
     m.add_class::<PyReader>()?;
     m.add_class::<EntryIter>()?;
+    m.add_wrapped(wrap_pyfunction!(__setup))?;
     Ok(())
 }

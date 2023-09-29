@@ -79,3 +79,27 @@ impl Reader {
         Ok(self)
     }
 }
+
+/*
+#[cfg(test)]
+mod tests {
+    use crate::test_setup::setup;
+    use super::*;
+
+    #[test]
+    #[cfg(feature = "gcs")]
+    fn test_gcs_reader() {
+        setup();
+        let mut reader = Reader::new();
+        reader
+            .open_gcs("gs://test-rand_archive/dummy.raa")
+            .unwrap()
+            .by_count(64)
+            .with_buffering(32)
+            .unwrap()
+            .iter()
+            .unwrap()
+            .for_each(|_| {});
+    }
+}
+*/

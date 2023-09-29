@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
 use color_eyre::eyre::Result;
 use futures::executor::block_on;
+#[cfg(feature = "gcs")]
 use gcs_reader::GCSReader;
 
 #[async_trait]

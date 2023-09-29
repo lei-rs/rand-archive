@@ -20,7 +20,10 @@ where
         let stream = stream::iter(vec);
         BoundedIter {
             iter: stream.buffer_unordered(limit),
-            rt: Builder::new_current_thread().enable_io().build().unwrap()
+            rt: Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
         }
     }
 }
